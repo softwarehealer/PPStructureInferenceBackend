@@ -1,63 +1,50 @@
 # PPStructure API
 
-Minimal inference-only extraction of the local PaddleOCR PPStructure flow.
+PPStructure inference API for the BBox viewer. It runs the same inference flow as `pps-pipeline`
+(same vendored PaddleOCR, engine, preprocessing, settings and models) and adds the viewer's own
+`/process` endpoint, so coordinates picked in the viewer match what `pps-pipeline` extracts.
 
-## Python API
+## Layout
 
-```python
-from ppstructure_api import PPStructureEngine
-
-engine = PPStructureEngine()
-result = engine.predict_file("/path/to/image.png")
+```
+src/
+  main.py       FastAPI app
+  configs/      settings (.env), logging
+  PaddleOCR/    vendored PaddleOCR inference code
+  pipeline/     /health, /parse, /parse-text  + engine        (same as pps-pipeline)
+  extraction/   /extract-by-coordinates                       (same as pps-pipeline)
+  viewer/       /process for the BBox viewer                  (this project only)
+inference/      OCR, layout and table models
 ```
 
-The result is JSON-safe: raw cropped image arrays are removed and NumPy values are converted to normal Python values.
+`configs/`, `PaddleOCR/`, `pipeline/` and `extraction/` are copies of `pps-pipeline/src/pps_pipeline/*`
+with the `pps_pipeline.` import prefix removed. Keep them in sync by copying them over again, so both
+projects never produce different results for the same document.
 
-## Smoke CLI
-
-```bash
-python3 scripts/ppstructure_smoke.py /path/to/image.png --output-json output/result.json
-```
-
-## HTTP API
-
-Install dependencies in your PaddleOCR venv, then start the API:
+## Run
 
 ```bash
 pip install -r requirements.txt
-python3 scripts/serve_api.py --host 127.0.0.1 --port 8000 --log-level info
+cp .env.example .env      # then set SECRET_KEY
+./run.sh
 ```
 
-Endpoints:
+The server starts on `localhost:8000`, which is what the viewer calls. `run.sh` uses `$PYTHON` if set,
+else `.venv/bin/python`, else `python` on PATH; `HOST` and `PORT` override the defaults.
 
-- `GET /health`
-- `POST /process` with multipart field `file` for backward-compatible single upload
-- `POST /process` with repeated multipart field `files` for one PDF or multiple image uploads
+PDF splitting uses `pdf2image`, which needs Poppler (`poppler-utils` on Debian/Ubuntu, `poppler-utils` on Fedora).
 
-Supported uploads: `pdf`, `png`, `jpg`, `jpeg`, `webp`. A request may contain either one PDF or one/more image files.
+## Endpoints
 
-The response contains `pages`; each page includes:
+All uploads are multipart: one PDF, or one or more images (`pdf`, `png`, `jpg`, `jpeg`, `webp`).
+Every endpoint takes an optional `granularity` form field: `lines` (default) or `words`.
 
-- `success`: whether OCR completed for that page.
-- `error`: a page-level error message when OCR failed.
-- `image_base64`: the page image, returned even if OCR failed when possible.
-- `viewer_result`: Flutter viewer-compatible JSON. Failed pages return an empty result with the correct page bbox.
-- `raw_result`: original PPStructure JSON-safe result list when OCR succeeds.
+| Endpoint | Returns |
+|---|---|
+| `GET /health` | `{"status": "ok"}` |
+| `POST /parse` | Per page: every OCR line (or word) with `text`, `confidence`, `text_region` |
+| `POST /parse-text` | Per page: just the list of texts |
+| `POST /extract-by-coordinates` | `fields` form field `[{"key": "dob", "bbox": [x1, y1, x2, y2], "page": 0}]` returns `[{"key": "dob", "value": "..."}]` |
+| `POST /process` | Like `/parse`, plus per page `image_base64` and the raw PPStructure output (`raw_result`), with the OCR result under `viewer_result`. Accepts `files` or a single `file`. |
 
-For PDFs, pages are split to PNGs in a temporary request folder and processed independently. For multi-image uploads, images are saved and normalized into the same temporary page folder before processing. If OCR fails on one page, the failure is logged and returned for that page while remaining pages continue.
-
-PDF splitting uses `pdf2image`, which requires Poppler installed on the system. On Ubuntu/Debian:
-
-```bash
-sudo apt-get install poppler-utils
-```
-
-## Included Runtime Assets
-
-- `inference/en_PP-OCRv3_det_infer`
-- `inference/en_PP-OCRv4_rec_infer`
-- `inference/en_ppstructure_mobile_v2.0_SLANet_infer`
-- `inference/picodet_lcnet_x1_0_fgd_layout_infer`
-- English OCR, table-structure, and PubLayNet layout dictionaries under `ppocr/utils`.
-
-Training, KIE, PDF recovery, generated outputs, and old `src` scripts are intentionally excluded.
+Coordinates are pixels of the page image: images as uploaded (EXIF rotation applied), PDFs rendered at 300 DPI.

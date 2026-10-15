@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ppstructure-api"
 version = "0.1.0"
-description = "Minimal local PPStructure inference wrapper"
+description = "PPStructure inference API for the BBox viewer, sharing the pps-pipeline inference flow"
 requires-python = ">=3.10"
 dependencies = [
   "paddlepaddle==3.1.1",
-  "opencv-python-headless==4.13.0.92",
+  "opencv-python==4.13.0.92",
   "numpy==2.2.6",
   "pillow==12.1.1",
   "PyYAML==6.0.3",
@@ -17,14 +17,16 @@ dependencies = [
   "shapely==2.1.2",
   "pyclipper==1.4.0",
   "scikit-image==0.25.2",
-  "lxml==6.0.2",
-  "openpyxl==3.1.5",
-  "premailer==3.10.0",
   "fastapi==0.124.2",
   "uvicorn==0.38.0",
   "python-multipart==0.0.21",
   "pdf2image==1.17.0",
+  "pydantic-settings",
+  "lmdb==2.0.0",
+  "albumentations",
+  "albucore",
+  "packaging",
+  "setuptools"
 ]
 
-[tool.setuptools.packages.find]
-include = ["ppstructure_api*", "ppstructure*", "ppocr*", "tools*"]
+
