@@ -41,7 +41,19 @@ from ppstructure.utility import parse_args, draw_structure_result, cal_ocr_word_
 logger = get_logger()
 
 
+def _short_error(exc):
+    """The line naming the error; Paddle errors span many lines of hints."""
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    named = [line for line in lines if "Error:" in line]
+    return (named or lines or [""])[0]
+
+
 class StructureSystem(object):
+    # Layout regions smaller than this (px) are skipped; tables smaller than
+    # MIN_TABLE_REGION_SIZE use the page OCR text instead of the table model.
+    MIN_REGION_SIZE = 8
+    MIN_TABLE_REGION_SIZE = 32
+
     def __init__(self, args):
         self.mode = args.mode
         self.recovery = args.recovery
@@ -126,11 +138,24 @@ class StructureSystem(object):
 
         if self.mode == "structure":
             ori_im = img.copy()
+            h, w = ori_im.shape[:2]
             if self.layout_predictor is not None:
-                layout_res, elapse = self.layout_predictor(img)
-                time_dict["layout"] += elapse
+                try:
+                    layout_res, elapse = self.layout_predictor(img)
+                    time_dict["layout"] += elapse
+                except Exception as exc:
+                    # Some pages crash the older layout model under Paddle 3; keep
+                    # the page's OCR text by treating it as a single text region.
+                    logger.warning(
+                        "Layout model failed, using the whole page as one region: %s",
+                        _short_error(exc),
+                    )
+                    layout_res = [dict(bbox=None, label="text", score=0.0)]
+                if not layout_res:
+                    # No regions found: text is only kept inside regions, so the page would
+                    # come back empty. Treat it as a single text region instead.
+                    layout_res = [dict(bbox=None, label="text", score=0.0)]
             else:
-                h, w = ori_im.shape[:2]
                 layout_res = [dict(bbox=None, label="table", score=0.0)]
 
             # As reported in issues such as #10270 and #11665, the old
@@ -150,8 +175,19 @@ class StructureSystem(object):
             for region in layout_res:
                 res = ""
                 if region["bbox"] is not None:
-                    x1, y1, x2, y2 = region["bbox"]
-                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    # Layout boxes can fall outside the page, be reversed or be
+                    # a few pixels wide; cropping those crashes the next stage.
+                    clamped = self._clamp_bbox(region["bbox"], w, h)
+                    if clamped is None:
+                        logger.warning(
+                            "Skipping invalid %s region bbox=%s image=%sx%s",
+                            region["label"],
+                            region["bbox"],
+                            w,
+                            h,
+                        )
+                        continue
+                    x1, y1, x2, y2 = clamped
                     roi_img = ori_im[y1:y2, x1:x2, :]
                 else:
                     x1, y1, x2, y2 = 0, 0, w, h
@@ -159,19 +195,39 @@ class StructureSystem(object):
                 bbox = [x1, y1, x2, y2]
 
                 if region["label"] == "table":
-                    if self.table_system is not None:
-                        res, table_time_dict = self.table_system(
-                            roi_img, return_ocr_result_in_table
-                        )
-                        time_dict["table"] += table_time_dict["table"]
-                        time_dict["table_match"] += table_time_dict["match"]
-                        time_dict["det"] += table_time_dict["det"]
-                        time_dict["rec"] += table_time_dict["rec"]
+                    use_table_model = self.table_system is not None and self._is_valid_region(
+                        roi_img, self.MIN_TABLE_REGION_SIZE
+                    )
+                    if use_table_model:
+                        try:
+                            res, table_time_dict = self.table_system(
+                                roi_img, return_ocr_result_in_table
+                            )
+                            time_dict["table"] += table_time_dict["table"]
+                            time_dict["table_match"] += table_time_dict["match"]
+                            time_dict["det"] += table_time_dict["det"]
+                            time_dict["rec"] += table_time_dict["rec"]
+                            if text_res is not None:
+                                # The table result is HTML; keep the region's OCR lines (page
+                                # coordinates) too, so text-based consumers still see the table text.
+                                res["text_lines"] = self._filter_text_res(text_res, bbox)
+                        except Exception as exc:
+                            # Same Paddle 3 issue as the layout model.
+                            logger.warning(
+                                "Table model failed for region %s, keeping its OCR text: %s",
+                                bbox,
+                                _short_error(exc),
+                            )
+                            use_table_model = False
+                    if not use_table_model and text_res is not None:
+                        # No table model, region too small, or the model failed: keep its plain OCR text.
+                        res = self._filter_text_res(text_res, bbox)
 
                 elif region["label"] == "equation" and self.formula_system is not None:
-                    latex_res, formula_time = self.formula_system([roi_img])
-                    time_dict["formula"] += formula_time
-                    res = {"latex": latex_res[0]}
+                    if self._is_valid_region(roi_img, self.MIN_REGION_SIZE):
+                        latex_res, formula_time = self.formula_system([roi_img])
+                        time_dict["formula"] += formula_time
+                        res = {"latex": latex_res[0]}
 
                 else:
                     if text_res is not None:
@@ -188,6 +244,31 @@ class StructureSystem(object):
                         "score": region["score"],
                     }
                 )
+
+            if text_res:
+                # Text is only kept inside layout regions; lines the layout model left
+                # uncovered (often page headers) would be lost, so keep them as one more region.
+                uncovered = [
+                    r
+                    for r in text_res
+                    if not any(self._has_intersection(region["bbox"], self._text_rect(r)) for region in res_list)
+                ]
+                if uncovered:
+                    rects = [self._text_rect(r) for r in uncovered]
+                    x1, y1 = int(min(r[0] for r in rects)), int(min(r[1] for r in rects))
+                    x2, y2 = int(max(r[2] for r in rects)), int(max(r[3] for r in rects))
+                    position = next((i for i, region in enumerate(res_list) if region["bbox"][1] > y1), len(res_list))
+                    res_list.insert(
+                        position,
+                        {
+                            "type": "text",
+                            "bbox": [x1, y1, x2, y2],
+                            "img": ori_im[max(y1, 0) : y2, max(x1, 0) : x2, :],
+                            "res": uncovered,
+                            "img_idx": img_idx,
+                            "score": 0.0,
+                        },
+                    )
 
             end = time.time()
             time_dict["all"] = end - start
@@ -252,14 +333,32 @@ class StructureSystem(object):
                 )
         return res, ocr_time_dict
 
+    def _clamp_bbox(self, bbox, width, height):
+        """Round, order and clip a layout box to the image; None if it is too small."""
+        if bbox is None or len(bbox) < 4:
+            return None
+        x1, y1, x2, y2 = [int(round(value)) for value in bbox[:4]]
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
+        x1, x2 = max(0, min(x1, width)), max(0, min(x2, width))
+        y1, y2 = max(0, min(y1, height)), max(0, min(y2, height))
+        if x2 - x1 < self.MIN_REGION_SIZE or y2 - y1 < self.MIN_REGION_SIZE:
+            return None
+        return x1, y1, x2, y2
+
+    def _is_valid_region(self, image, min_size):
+        if image is None or image.size == 0:
+            return False
+        height, width = image.shape[:2]
+        return width >= min_size and height >= min_size
+
     def _filter_text_res(self, text_res, bbox):
-        res = []
-        for r in text_res:
-            box = r["text_region"]
-            rect = box[0][0], box[0][1], box[2][0], box[2][1]
-            if self._has_intersection(bbox, rect):
-                res.append(r)
-        return res
+        return [r for r in text_res if self._has_intersection(bbox, self._text_rect(r))]
+
+    @staticmethod
+    def _text_rect(text_item):
+        box = text_item["text_region"]
+        return box[0][0], box[0][1], box[2][0], box[2][1]
 
     def _has_intersection(self, rect1, rect2):
         x_min1, y_min1, x_max1, y_max1 = rect1

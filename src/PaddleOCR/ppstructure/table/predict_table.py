@@ -94,7 +94,8 @@ class TableSystem(object):
         time_dict = {"det": 0, "rec": 0, "table": 0, "all": 0, "match": 0}
         start = time.time()
         structure_res, elapse = self._structure(copy.deepcopy(img))
-        result["cell_bbox"] = structure_res[1].tolist()
+        cell_bbox = structure_res[1]
+        result["cell_bbox"] = cell_bbox.tolist() if hasattr(cell_bbox, "tolist") else []
         time_dict["table"] = elapse
 
         dt_boxes, rec_res, det_elapse, rec_elapse = self._ocr(copy.deepcopy(img))
@@ -106,7 +107,8 @@ class TableSystem(object):
             result["rec_res"] = rec_res
 
         tic = time.time()
-        pred_html = self.match(structure_res, dt_boxes, rec_res)
+        # No text found in the table region: nothing to match into cells.
+        pred_html = self.match(structure_res, dt_boxes, rec_res) if len(dt_boxes) else ""
         toc = time.time()
         time_dict["match"] = toc - tic
         result["html"] = pred_html
@@ -133,15 +135,20 @@ class TableSystem(object):
             r_boxes.append(box)
         dt_boxes = np.array(r_boxes)
         logger.debug("dt_boxes num : {}, elapse : {}".format(len(dt_boxes), det_elapse))
-        if dt_boxes is None:
-            return None, None
 
+        # Keep only boxes whose crop has pixels, so boxes and texts stay paired.
+        kept_boxes = []
         img_crop_list = []
-        for i in range(len(dt_boxes)):
-            det_box = dt_boxes[i]
+        for det_box in dt_boxes:
             x0, y0, x1, y1 = expand(2, det_box, img.shape)
             text_rect = img[int(y0) : int(y1), int(x0) : int(x1), :]
+            if text_rect.size == 0:
+                continue
+            kept_boxes.append(det_box)
             img_crop_list.append(text_rect)
+        if not img_crop_list:
+            return np.empty((0, 4), dtype=np.float32), [], det_elapse, 0
+        dt_boxes = np.array(kept_boxes)
         rec_res, rec_elapse = self.text_recognizer(img_crop_list)
         logger.debug("rec_res num  : {}, elapse : {}".format(len(rec_res), rec_elapse))
         return dt_boxes, rec_res, det_elapse, rec_elapse

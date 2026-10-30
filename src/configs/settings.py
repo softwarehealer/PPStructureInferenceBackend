@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -32,6 +33,10 @@ class Settings(BaseSettings):
     PPSTRUCTURE_USE_PDF2DOCX_API: bool = False
     PPSTRUCTURE_SHOW_LOG: bool = False
     PPSTRUCTURE_USE_ANGLE_CLS: bool = False
+    # Text direction classifier model; needed when PPSTRUCTURE_USE_ANGLE_CLS is true (fixes upside-down and vertical text)
+    PPSTRUCTURE_CLS_MODEL_DIR: str = ""
+    # Minimum confidence to flip a text line the classifier thinks is upside down; Paddle's 0.9 flips some normal lines
+    PPSTRUCTURE_CLS_THRESH: float = 0.95
     PPSTRUCTURE_USE_ONNX: bool = False
     PPSTRUCTURE_BENCHMARK: bool = False
     PPSTRUCTURE_RETURN_WORD_BOX: bool = False
@@ -47,6 +52,13 @@ class Settings(BaseSettings):
 
     # Minimum fraction of an OCR line's area that must lie inside a requested box to count as a match
     EXTRACTION_MIN_OVERLAP: float = 0.5
+
+    # Gemini drafts a template for a document no stored template matches
+    GEMINI_API_KEY: SecretStr = SecretStr("")
+    GEMINI_MODEL_NAME: str = "gemini-3-flash-preview"
+    # Seconds per attempt; drafting reads the whole page and all its OCR words
+    GEMINI_TIMEOUT: int = 180
+    GEMINI_MAX_RETRIES: int = 3
 
     model_config=SettingsConfigDict(env_file=".env")
 

@@ -10,3 +10,6 @@ venv/
 # Runtime output
 logs/
 src/output/
+
+# Template store (temporary SQLite while the template flow is evaluated)
+data/

@@ -8,6 +8,7 @@ from starlette import status
 from alignment import service
 from alignment.models import (
     ExtractionWithReferenceResponse,
+    NormalizeWithReferenceResponse,
     ParseTextWithReferenceResponse,
     ParseWithReferenceResponse,
     ProcessWithReferenceResponse,
@@ -91,6 +92,22 @@ async def process_with_reference(
     logger.info("process-with-reference api called ...")
     try:
         return await service.process_with_reference(files, reference, granularity)
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except DocumentProcessingError as de:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(de))
+
+
+@router.post("/normalize-with-reference")
+async def normalize_with_reference(
+    files: Annotated[list[UploadFile], File()],
+    reference: ReferenceFile,
+) -> NormalizeWithReferenceResponse:
+    """Each page aligned to the reference, as images only (no OCR): the alignment step of
+    /process-with-reference, to check it quickly."""
+    logger.info("normalize-with-reference api called ...")
+    try:
+        return await service.normalize_with_reference(files, reference)
     except ValidationError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except DocumentProcessingError as de:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import tempfile
 import time
@@ -14,7 +15,10 @@ from fastapi import UploadFile
 
 from alignment.models import (
     ExtractionWithReferenceResponse,
+    NormalizeWithReferenceResponse,
     PageAlignment,
+    PageImage,
+    PageImages,
     ParseTextWithReferenceResponse,
     ParseWithReferenceResponse,
     ProcessWithReferenceResponse,
@@ -49,6 +53,10 @@ class AlignedUploads:
     input_type: str
     alignment: list[PageAlignment]
     elapsed_ms: float
+    # The reference's own pages, rendered exactly as used for alignment
+    reference_uploads: list[UploadFile]
+    reference_filename: str
+    reference_input_type: str
 
 
 async def parse_with_reference(
@@ -58,7 +66,8 @@ async def parse_with_reference(
 ) -> ParseWithReferenceResponse:
     aligned = await align_uploads(files, reference)
     parsed = await pipeline_service.parse_uploads(aligned.uploads, granularity)
-    return ParseWithReferenceResponse(**_with_alignment(parsed.model_dump(), aligned))
+    reference_parsed = await pipeline_service.parse_uploads(aligned.reference_uploads, granularity)
+    return ParseWithReferenceResponse(**_combine(parsed.model_dump(), reference_parsed.model_dump(), aligned))
 
 
 async def parse_text_with_reference(
@@ -68,7 +77,8 @@ async def parse_text_with_reference(
 ) -> ParseTextWithReferenceResponse:
     aligned = await align_uploads(files, reference)
     parsed = await pipeline_service.parse_text(aligned.uploads, granularity)
-    return ParseTextWithReferenceResponse(**_with_alignment(parsed.model_dump(), aligned))
+    reference_parsed = await pipeline_service.parse_text(aligned.reference_uploads, granularity)
+    return ParseTextWithReferenceResponse(**_combine(parsed.model_dump(), reference_parsed.model_dump(), aligned))
 
 
 async def extract_by_coordinates_with_reference(
@@ -79,7 +89,12 @@ async def extract_by_coordinates_with_reference(
 ) -> ExtractionWithReferenceResponse:
     aligned = await align_uploads(files, reference)
     extracted = await extraction_service.extract_by_coordinates(aligned.uploads, field_boxes, granularity)
-    return ExtractionWithReferenceResponse(**_with_alignment(extracted.model_dump(), aligned))
+    reference_extracted = await extraction_service.extract_by_coordinates(
+        aligned.reference_uploads, field_boxes, granularity
+    )
+    return ExtractionWithReferenceResponse(
+        **_combine(extracted.model_dump(), reference_extracted.model_dump(), aligned)
+    )
 
 
 async def process_with_reference(
@@ -89,7 +104,51 @@ async def process_with_reference(
 ) -> ProcessWithReferenceResponse:
     aligned = await align_uploads(files, reference)
     processed = await viewer_service.process_uploads(aligned.uploads, granularity)
-    return ProcessWithReferenceResponse(**_with_alignment(processed.model_dump(), aligned))
+    reference_processed = await viewer_service.process_uploads(aligned.reference_uploads, granularity)
+    return ProcessWithReferenceResponse(
+        **_combine(processed.model_dump(), reference_processed.model_dump(), aligned)
+    )
+
+
+async def normalize_with_reference(files: list[UploadFile], reference: UploadFile) -> NormalizeWithReferenceResponse:
+    """Only the alignment step of the with-reference endpoints: each page warped onto the reference, no OCR."""
+    started_at = time.perf_counter()
+    aligned = await align_uploads(files, reference)
+    pages = [await _page_image(index, upload) for index, upload in enumerate(aligned.uploads)]
+    reference_pages = [await _page_image(index, upload) for index, upload in enumerate(aligned.reference_uploads)]
+    return NormalizeWithReferenceResponse(
+        filename=aligned.filename,
+        input_type=aligned.input_type,
+        page_count=len(pages),
+        pages=pages,
+        alignment=aligned.alignment,
+        reference=PageImages(
+            filename=aligned.reference_filename,
+            input_type=aligned.reference_input_type,
+            page_count=len(reference_pages),
+            pages=reference_pages,
+        ),
+        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
+    )
+
+
+async def _page_image(index: int, upload: UploadFile) -> PageImage:
+    """A page upload as a JPEG for display (quality 92: much smaller than the PNG, looks the same)."""
+    try:
+        image = cv2.imdecode(np.frombuffer(await upload.read(), np.uint8), cv2.IMREAD_COLOR)
+    finally:
+        await upload.close()
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise DocumentProcessingError(f"Could not encode page {index + 1}")
+    height, width = image.shape[:2]
+    return PageImage(
+        page_index=index,
+        image_name=upload.filename or f"page_{index + 1:04d}.png",
+        image_base64=base64.b64encode(encoded.tobytes()).decode("ascii"),
+        width=width,
+        height=height,
+    )
 
 
 async def align_uploads(files: list[UploadFile], reference: UploadFile | None) -> AlignedUploads:
@@ -111,7 +170,9 @@ async def align_uploads(files: list[UploadFile], reference: UploadFile | None) -
         with tempfile.TemporaryDirectory(prefix="align_") as tmp:
             work_dir = Path(tmp)
             page_paths, input_type, filename = _prepare(uploads, work_dir / "document", request_id)
-            reference_paths, _, _ = _prepare([reference], work_dir / "reference", request_id)
+            reference_paths, reference_input_type, reference_filename = _prepare(
+                [reference], work_dir / "reference", request_id
+            )
             if len(reference_paths) not in (1, len(page_paths)):
                 raise ValidationError(
                     f"Reference has {len(reference_paths)} pages; use a one-page reference "
@@ -146,6 +207,12 @@ async def align_uploads(files: list[UploadFile], reference: UploadFile | None) -
                 )
                 alignment.append(page_alignment)
                 aligned_uploads.append(_png_upload(page_image, f"page_{index + 1:04d}.png"))
+
+            # Already PNG pages, so they are passed on as-is.
+            reference_uploads = [
+                UploadFile(io.BytesIO(path.read_bytes()), filename=f"reference_{index + 1:04d}.png")
+                for index, path in enumerate(reference_paths)
+            ]
     finally:
         for upload in [*uploads, reference]:
             await upload.close()
@@ -156,6 +223,9 @@ async def align_uploads(files: list[UploadFile], reference: UploadFile | None) -
         input_type=input_type,
         alignment=alignment,
         elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        reference_uploads=reference_uploads,
+        reference_filename=reference_filename,
+        reference_input_type=reference_input_type,
     )
 
 
@@ -200,8 +270,12 @@ def _align_page(
     *,
     index: int,
     reference_index: int,
+    page_features: tuple[np.ndarray, Any] | None = None,
 ) -> tuple[np.ndarray, PageAlignment]:
-    """Warp one page onto the reference. Returns the page unchanged when the match is not confident."""
+    """Warp one page onto the reference. Returns the page unchanged when the match is not confident.
+
+    Pass the page's ``_features`` when aligning it to several references, to compute them once.
+    """
     started_at = time.perf_counter()
     matches = inliers = 0
 
@@ -217,7 +291,7 @@ def _align_page(
         )
 
     reference_points, reference_descriptors = reference_features
-    page_points, page_descriptors = _features(image)
+    page_points, page_descriptors = page_features or _features(image)
     if page_descriptors is None or reference_descriptors is None or len(page_points) < 2 or len(reference_points) < 2:
         return result(image, False, "Not enough detail to match against the reference.")
 
@@ -271,12 +345,20 @@ def _png_upload(image: np.ndarray, filename: str) -> UploadFile:
     return UploadFile(io.BytesIO(encoded.tobytes()), filename=filename)
 
 
-def _with_alignment(response: dict[str, Any], aligned: AlignedUploads) -> dict[str, Any]:
-    """Report the original upload's name/type and include alignment time in the total."""
+def _combine(response: dict[str, Any], reference_response: dict[str, Any], aligned: AlignedUploads) -> dict[str, Any]:
+    """Document result plus the reference's result, both reporting their original upload's name/type.
+
+    The top-level elapsed_ms covers the whole request: alignment and both OCR runs.
+    """
     return {
         **response,
         "filename": aligned.filename,
         "input_type": aligned.input_type,
-        "elapsed_ms": round(response["elapsed_ms"] + aligned.elapsed_ms, 2),
+        "elapsed_ms": round(response["elapsed_ms"] + reference_response["elapsed_ms"] + aligned.elapsed_ms, 2),
         "alignment": aligned.alignment,
+        "reference": {
+            **reference_response,
+            "filename": aligned.reference_filename,
+            "input_type": aligned.reference_input_type,
+        },
     }

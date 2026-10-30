@@ -23,6 +23,7 @@ os.environ["FLAGS_allocator_strategy"] = "auto_growth"
 
 import cv2
 import copy
+import gc
 import numpy as np
 import json
 import time
@@ -59,6 +60,11 @@ class TextSystem(object):
 
         self.args = args
         self.crop_image_res_index = 0
+
+    def _rebuild_text_detector(self):
+        self.text_detector = None
+        gc.collect()
+        self.text_detector = predict_det.TextDetector(copy.deepcopy(self.args))
 
     def draw_crop_rec_res(self, output_dir, img_crop_list, rec_res):
         os.makedirs(output_dir, exist_ok=True)
@@ -106,7 +112,14 @@ class TextSystem(object):
             )
             elapse = sum(elapsed)
         else:
-            dt_boxes, elapse = self.text_detector(img)
+            try:
+                dt_boxes, elapse = self.text_detector(img)
+            except Exception as exc:
+                # A Paddle predictor can stay broken after an internal error:
+                # rebuild the detector once and retry this image.
+                logger.warning("Text detector failed, rebuilding and retrying: %s: %s", type(exc).__name__, exc)
+                self._rebuild_text_detector()
+                dt_boxes, elapse = self.text_detector(img)
 
         time_dict["det"] = elapse
 

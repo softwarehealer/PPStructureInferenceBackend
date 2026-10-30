@@ -129,6 +129,8 @@ class PPStructureEngine:
         args.use_gpu = config.use_gpu
         args.show_log = config.show_log
         args.use_angle_cls = settings.PPSTRUCTURE_USE_ANGLE_CLS
+        args.cls_model_dir = settings.PPSTRUCTURE_CLS_MODEL_DIR or None
+        args.cls_thresh = settings.PPSTRUCTURE_CLS_THRESH
         args.use_onnx = settings.PPSTRUCTURE_USE_ONNX
         args.benchmark = settings.PPSTRUCTURE_BENCHMARK
         args.return_word_box = settings.PPSTRUCTURE_RETURN_WORD_BOX
@@ -174,6 +176,8 @@ class PPStructureEngine:
             "table_char_dict_path": self.config.table_char_dict_path,
             "layout_dict_path": self.config.layout_dict_path,
         }
+        if settings.PPSTRUCTURE_USE_ANGLE_CLS:
+            required["cls_model_dir"] = settings.PPSTRUCTURE_CLS_MODEL_DIR
         missing = [f"{name}: {path}" for name, path in required.items() if not Path(path).exists()]
         if missing:
             raise FileNotFoundError("Missing PPStructure asset(s):\n" + "\n".join(missing))

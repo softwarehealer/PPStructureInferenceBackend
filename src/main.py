@@ -10,6 +10,8 @@ from pipeline.api import router as pps_router
 from extraction.api import router as extraction_router
 from viewer.api import router as viewer_router
 from alignment.api import router as alignment_router
+from templates.api import router as templates_router
+from normalize.api import router as normalize_router
 
 
 # from app.core.middlewares import apply_middlewares
@@ -65,6 +67,8 @@ app.include_router(pps_router)
 app.include_router(extraction_router)
 app.include_router(viewer_router)
 app.include_router(alignment_router)
+app.include_router(templates_router)
+app.include_router(normalize_router)
 
-logger.info(f"Settings for the applications are \n {settings.model_dump()} \n")
+logger.info(f"Settings for the applications are \n {settings.model_dump(exclude={'SECRET_KEY'})} \n")
 logger.info("PPStructure pipeline started .....")

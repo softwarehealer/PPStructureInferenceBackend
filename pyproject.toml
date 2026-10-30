@@ -26,7 +26,8 @@ dependencies = [
   "albumentations",
   "albucore",
   "packaging",
-  "setuptools"
+  "setuptools",
+  "google-genai==2.23.0"
 ]
 
 
